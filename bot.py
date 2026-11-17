@@ -5,7 +5,7 @@
 Что умеет:
   • сразу советует, чем бить первым («норка»)
   • после каждого отклика пересчитывает живых кандидатов и лучшие ходы
-  • /new — сброс между словами
+  • /solve — сброс между словами
   • работает только в разрешённых чатах (ALLOWED_CHATS)
   • платный режим: три слова бесплатно, дальше код разблокировки
 
@@ -32,7 +32,7 @@ from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, ErrorEvent, Message
 
-VERSION = "2026-11-17 · 14:00"
+VERSION = "2026-11-17 · 14:40"
 
 # ---------------------------------------------------------------- настройки
 
@@ -166,7 +166,8 @@ def pattern_of(code: int) -> str:
 def fb_matrix(guess_idx: np.ndarray, answer_idx: np.ndarray, chunk: int = 96) -> np.ndarray:
     """Матрица кодов отклика (len(guess) × len(answer)), значения 0..242.
 
-    Считаем на лету: полная матрица 5060×5060 не нужна, потому что первый ход
+    Считаем на лету: полная матрица «весь словарь × весь словарь» не нужна,
+    потому что первый ход
     у нас фиксирован, а дальше живых кандидатов уже мало.
     """
     gi = np.asarray(guess_idx)
@@ -481,11 +482,14 @@ HELP = (
     "Можно слитно (<code>норка00210</code>), можно несколько ходов сразу — "
     "с новой строки или через <code>;</code>\n\n"
     "<b>Команды</b>\n"
-    "/new — новое слово (сброс)\n"
+    "/solve — новое слово (сброс)\n"
+    "/hint — подсказать ход прямо сейчас\n"
     "/state — что известно и сколько кандидатов\n"
     "/list — живые кандидаты\n"
     "/undo — отменить последний ход\n"
-    "/help — эта справка"
+    "/rules — эта справка\n\n"
+    "<i>В общем чате я откликаюсь только на точный формат «слово и пять цифр», "
+    "чтобы не мешать игровому боту.</i>"
 )
 
 FORMAT_HINT = ("Формат: слово и пять цифр.\n<code>норка 00210</code>\n\n"
@@ -507,7 +511,7 @@ async def render_answer(game: Game, message: Message, warnings: list[str]) -> st
                 "/state, отменить последний ход — /undo.")
 
     if alive.size == 1:
-        return head + f"✅ <b>Это {WORDS[alive[0]].upper()}</b>\n\nНовое слово — /new"
+        return head + f"✅ <b>Это {WORDS[alive[0]].upper()}</b>\n\nНовое слово — /solve"
 
     if alive.size == 2:
         a, b = WORDS[alive[0]], WORDS[alive[1]]
@@ -537,7 +541,7 @@ async def render_answer(game: Game, message: Message, warnings: list[str]) -> st
 
 # ---------------------------------------------------------------- команды
 
-@router.message(Command("chatid"))
+@router.message(Command("myid"))
 async def cmd_chatid(message: Message):
     await message.answer(
         f"id этого чата: <code>{message.chat.id}</code>\n"
@@ -546,14 +550,14 @@ async def cmd_chatid(message: Message):
     )
 
 
-@router.message(CommandStart())
-@router.message(Command("help"))
+@router.message(CommandStart(), F.chat.type == "private")
+@router.message(Command("rules", "формат", "справка"))
 async def cmd_help(message: Message):
     user_rec(message)
     await message.answer(HELP + "\n\n" + f"Первым ходом бей <b>{OPENER.upper()}</b>.")
 
 
-@router.message(Command("new", "сброс", "новое"))
+@router.message(Command("solve", "решать", "слово"))
 async def cmd_new(message: Message):
     ok, why = quota_ok(message)
     if not ok:
@@ -569,6 +573,26 @@ async def cmd_new(message: Message):
         f"Потом пришлите отклик: <code>{OPENER} 00210</code>"
         + quota_tail(message)
     )
+
+
+@router.message(Command("hint", "ход", "подскажи"))
+async def cmd_hint(message: Message):
+    """Пересчитать и подсказать ход, не вводя новый отклик."""
+    game = games.get(message.chat.id)
+    if not game or not game.moves:
+        await message.answer(f"Ходов пока нет.\n\n→ Бей <b>{OPENER.upper()}</b>")
+        return
+    waiting = None
+    if game.alive.size > SLOW_THRESHOLD:
+        waiting = await message.answer(f"⏳ Считаю, кандидатов пока {game.alive.size}…")
+    text = await render_answer(game, message, [])
+    if waiting:
+        try:
+            await waiting.edit_text(text)
+            return
+        except Exception:
+            pass
+    await message.answer(text)
 
 
 @router.message(Command("state", "состояние"))
@@ -590,7 +614,7 @@ async def cmd_state(message: Message):
 async def cmd_list(message: Message):
     game = games.get(message.chat.id)
     if not game:
-        await message.answer("Ходов пока нет — /new и вперёд.")
+        await message.answer("Ходов пока нет — /solve и вперёд.")
         return
     alive = game.alive
     if alive.size == 0:
@@ -649,7 +673,7 @@ async def cmd_code(message: Message):
     save_data()
     log.info("Код %s активирован пользователем %s", code, message.from_user.id)
     await message.answer("✅ <b>Доступ открыт.</b> Ограничений больше нет.\n\n"
-                         "Новое слово — /new")
+                         "Новое слово — /solve")
 
 
 @router.message(Command("codes"))
@@ -731,7 +755,7 @@ async def cmd_stat(message: Message):
     await message.answer("\n".join(lines))
 
 
-@router.message(Command("version", "версия"))
+@router.message(Command("sinfo"))
 async def cmd_version(message: Message):
     await message.answer(
         f"🔖 <b>Версия: {VERSION}</b>\n\n"
@@ -753,6 +777,13 @@ def split_moves(text: str) -> list[str]:
 
 @router.message(F.text.regexp(LOOSE_RE))
 async def handle_move(message: Message):
+    # В общем чате рядом работает игровой бот, туда постоянно пишут слова и
+    # цифры. Поэтому в группе отвечаем, только если формат точный: слово и
+    # ровно пять цифр из 0/1/2. Всё остальное молча пропускаем.
+    in_group = message.chat.type in ("group", "supergroup")
+    if in_group and not MOVE_RE.search(message.text or ""):
+        return
+
     chunks = split_moves(message.text)
     parsed: list[tuple[str, str]] = []
     problems: list[str] = []
@@ -774,7 +805,7 @@ async def handle_move(message: Message):
             problems.append(f"«{chunk.strip()}» — в цифрах только 0, 1 и 2")
 
     if not parsed:
-        if problems:
+        if problems and not in_group:
             await message.answer("⚠️ " + "\n⚠️ ".join(problems[:4]) + "\n\n" + FORMAT_HINT)
         return
 
@@ -788,10 +819,10 @@ async def handle_move(message: Message):
             await message.answer(why)
             return
 
-    warnings = list(problems)
+    warnings = [] if in_group else list(problems)
     for word, resp in parsed:
         if len(game.moves) >= MAX_ATTEMPTS:
-            warnings.append(f"Попытки закончились — «{word}» не учёл. /new для нового слова")
+            warnings.append(f"Попытки закончились — «{word}» не учёл. /solve для нового слова")
             break
         if word not in INDEX:
             warnings.append(f"«{word}» нет в моём словаре — ход учёл, но в кандидаты не беру")
@@ -826,7 +857,8 @@ async def handle_move(message: Message):
     await message.answer(text)
 
 
-@router.message(F.text.regexp(r"^[а-яё]{5}$", flags=re.IGNORECASE))
+@router.message(F.text.regexp(r"^[а-яё]{5}$", flags=re.IGNORECASE),
+                F.chat.type == "private")
 async def handle_bare_word(message: Message):
     await message.answer("Это только слово — нужен ещё отклик.\n\n" + FORMAT_HINT)
 
